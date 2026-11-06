@@ -1,28 +1,19 @@
 import React, { useState } from 'react';
-import { Clock, Award, ShieldAlert, Play, Edit3, Trash2, Plus, CheckCircle2, Sparkles, Loader2 } from 'lucide-react';
-import { solveAnswersWithAI } from '../services/api';
+import { Clock, Award, ShieldAlert, Play, Edit3, Trash2, Plus } from 'lucide-react';
 import { useLanguage } from '../context/LanguageContext';
 
 export default function TestConfigEditor({ questions, onStartTest, onBack }) {
   const { t, lang } = useLanguage();
-  const [testQuestions, setTestQuestions] = useState(questions);
+  const [testQuestions, setTestQuestions] = useState(
+    questions.map(q => ({
+      ...q,
+      correctAnswer: null // Clean initial state: no green answers pre-selected
+    }))
+  );
   const [durationMinutes, setDurationMinutes] = useState(Math.max(10, Math.ceil(questions.length * 1.5)));
   const [marksPerQuestion, setMarksPerQuestion] = useState(4);
   const [negativeMarking, setNegativeMarking] = useState(1);
   const [editingId, setEditingId] = useState(null);
-  const [isSolving, setIsSolving] = useState(false);
-
-  const handleAutoSolve = async () => {
-    setIsSolving(true);
-    try {
-      const solved = await solveAnswersWithAI(testQuestions);
-      setTestQuestions(solved);
-    } catch (err) {
-      console.error("Auto solve failed:", err);
-    } finally {
-      setIsSolving(false);
-    }
-  };
 
   const handleQuestionTextChange = (id, newText) => {
     setTestQuestions(prev => prev.map(q => q.id === id ? { ...q, text: newText } : q));
@@ -39,10 +30,6 @@ export default function TestConfigEditor({ questions, onStartTest, onBack }) {
     }));
   };
 
-  const setCorrectOption = (qId, optIdx) => {
-    setTestQuestions(prev => prev.map(q => q.id === qId ? { ...q, correctAnswer: optIdx } : q));
-  };
-
   const deleteQuestion = (id) => {
     setTestQuestions(prev => prev.filter(q => q.id !== id));
   };
@@ -54,7 +41,7 @@ export default function TestConfigEditor({ questions, onStartTest, onBack }) {
       questionNumber: newNum,
       text: lang === 'as' ? "নতুন প্ৰশ্নৰ মূল পাঠ্য ইয়াত লিখক..." : "New custom question prompt here...",
       options: ["(1) Option 1", "(2) Option 2", "(3) Option 3", "(4) Option 4"],
-      correctAnswer: 0,
+      correctAnswer: null,
       explanation: "",
       marks: marksPerQuestion
     };
@@ -177,24 +164,6 @@ export default function TestConfigEditor({ questions, onStartTest, onBack }) {
           </h3>
           <div className="flex items-center space-x-2">
             <button
-              onClick={handleAutoSolve}
-              disabled={isSolving || testQuestions.length === 0}
-              className="flex items-center space-x-1.5 text-xs font-bold text-purple-700 hover:text-purple-800 bg-purple-50 hover:bg-purple-100 border border-purple-200 px-3 py-1.5 rounded-lg transition-all active:scale-95 disabled:opacity-50"
-              title="Automatically detect correct answers and explanations using ChatGPT"
-            >
-              {isSolving ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin text-purple-600" />
-                  <span>{t('solvingAI')}</span>
-                </>
-              ) : (
-                <>
-                  <Sparkles className="w-4 h-4 text-purple-600" />
-                  <span>{t('autoSolveAI')}</span>
-                </>
-              )}
-            </button>
-            <button
               onClick={addQuestion}
               className="flex items-center space-x-1.5 text-xs font-bold text-blue-600 hover:text-blue-700 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors"
             >
@@ -225,36 +194,25 @@ export default function TestConfigEditor({ questions, onStartTest, onBack }) {
                       <p className="text-slate-800 font-semibold text-base leading-relaxed">{q.text}</p>
                     )}
 
-                    {/* Options list */}
+                    {/* Options list: Neutral display without green pre-selection */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-4">
-                      {q.options.map((opt, optIdx) => {
-                        const isCorrect = q.correctAnswer === optIdx;
-                        return (
-                          <div
-                            key={optIdx}
-                            onClick={() => setCorrectOption(q.id, optIdx)}
-                            className={`p-3 rounded-xl border text-sm flex items-center justify-between cursor-pointer transition-all ${
-                              isCorrect 
-                                ? "bg-emerald-50 border-emerald-300 text-emerald-900 font-semibold"
-                                : "bg-slate-50 border-slate-200 text-slate-700 hover:border-slate-300"
-                            }`}
-                          >
-                            {isEditing ? (
-                              <input
-                                type="text"
-                                value={opt}
-                                onChange={(e) => handleOptionChange(q.id, optIdx, e.target.value)}
-                                className="w-full bg-white border border-slate-200 rounded px-2 py-0.5 text-xs"
-                              />
-                            ) : (
-                              <span>{opt}</span>
-                            )}
-                            {isCorrect && (
-                              <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 ml-2" />
-                            )}
-                          </div>
-                        );
-                      })}
+                      {q.options.map((opt, optIdx) => (
+                        <div
+                          key={optIdx}
+                          className="p-3 rounded-xl border text-sm flex items-center justify-between bg-slate-50 border-slate-200 text-slate-700"
+                        >
+                          {isEditing ? (
+                            <input
+                              type="text"
+                              value={opt}
+                              onChange={(e) => handleOptionChange(q.id, optIdx, e.target.value)}
+                              className="w-full bg-white border border-slate-200 rounded px-2 py-0.5 text-xs"
+                            />
+                          ) : (
+                            <span>{opt}</span>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   </div>
                 </div>
@@ -283,4 +241,3 @@ export default function TestConfigEditor({ questions, onStartTest, onBack }) {
     </div>
   );
 }
-

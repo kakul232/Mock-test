@@ -190,7 +190,7 @@ def rule_based_extractor(text: str) -> List[dict]:
                 "questionNumber": q_counter,
                 "text": stem,
                 "options": options,
-                "correctAnswer": 0,
+                "correctAnswer": None,
                 "explanation": "",
                 "marks": 1 if q_num <= 150 else 4
             })
