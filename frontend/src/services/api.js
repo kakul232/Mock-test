@@ -4,6 +4,61 @@
 
 const DEFAULT_HF_ENDPOINT = "https://mock-test-w7wm.onrender.com/extract-questions";
 
+export async function startExtractionJob(files, customEndpoint = null) {
+  const base = (customEndpoint?.trim() || import.meta.env.VITE_EXTRACTION_API_URL || DEFAULT_HF_ENDPOINT)
+    .replace("/extract-questions", "/start-extraction");
+
+  const formData = new FormData();
+  for (let i = 0; i < files.length; i++) {
+    formData.append("files", files[i]);
+  }
+
+  const response = await fetch(base, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Start extraction failed with HTTP ${response.status}`);
+  }
+
+  return await response.json(); // returns { success: true, jobId: "..." }
+}
+
+export async function checkExtractionProgress(jobId, customEndpoint = null) {
+  const base = (customEndpoint?.trim() || import.meta.env.VITE_EXTRACTION_API_URL || DEFAULT_HF_ENDPOINT)
+    .replace("/extract-questions", `/extraction-status/${jobId}`);
+
+  const response = await fetch(base);
+  if (!response.ok) {
+    throw new Error(`Status check failed with HTTP ${response.status}`);
+  }
+  return await response.json(); // returns { status, progress, currentStage, questions }
+}
+
+export async function solveAnswersWithAI(questions, customEndpoint = null) {
+  const baseEndpoint = (customEndpoint?.trim() || import.meta.env.VITE_EXTRACTION_API_URL || DEFAULT_HF_ENDPOINT)
+    .replace("/extract-questions", "/solve-answers");
+
+  try {
+    const response = await fetch(baseEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ questions }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Solving failed with status ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.solvedQuestions || questions;
+  } catch (err) {
+    console.warn("AI solve call failed, keeping current answers:", err);
+    return questions;
+  }
+}
+
 export async function extractQuestionsFromPDFs(files, customEndpoint = null, hfToken = null) {
   const endpoint = customEndpoint?.trim() || import.meta.env.VITE_EXTRACTION_API_URL || DEFAULT_HF_ENDPOINT;
   const token = hfToken?.trim() || import.meta.env.VITE_HF_TOKEN || "";
