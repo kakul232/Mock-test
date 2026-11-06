@@ -6,14 +6,15 @@ const DEFAULT_HF_ENDPOINT = "https://kakul232-pdf-mock-test-api.hf.space/extract
 
 export async function extractQuestionsFromPDFs(files, customEndpoint = null, hfToken = null) {
   const endpoint = customEndpoint?.trim() || import.meta.env.VITE_EXTRACTION_API_URL || DEFAULT_HF_ENDPOINT;
+  const token = hfToken?.trim() || import.meta.env.VITE_HF_TOKEN || "";
   
   const formData = new FormData();
   for (let i = 0; i < files.length; i++) {
     formData.append("files", files[i]);
   }
   
-  if (hfToken) {
-    formData.append("hf_token", hfToken);
+  if (token) {
+    formData.append("hf_token", token);
   }
 
   try {
