@@ -27,27 +27,54 @@ export default function ExamResults({ resultData, onRetake, onNewTest }) {
   const [isAiChecking, setIsAiChecking] = useState(false);
   const [aiChecked, setAiChecked] = useState(false);
 
-  // Automatically evaluate / check answers with AI upon submitting test
+  // Automatically evaluate ONLY attempted/submitted questions with AI upon submitting test
   useEffect(() => {
     let isMounted = true;
     const checkWithAI = async () => {
+      // Filter questions to only those the student actually answered/submitted
+      const attemptedQuestions = questions.filter(q => answers[q.id] !== undefined);
+      
+      if (attemptedQuestions.length === 0) {
+        setAiChecked(true);
+        return;
+      }
+
       setIsAiChecking(true);
       try {
-        const solved = await solveAnswersWithAI(questions);
-        if (!isMounted || !solved || solved.length === 0) return;
+        // Send ONLY attempted questions to AI to save quota & drastically speed up checking
+        const solvedAttempted = await solveAnswersWithAI(attemptedQuestions);
+        if (!isMounted || !solvedAttempted || solvedAttempted.length === 0) return;
 
-        setQuestions(solved);
+        // Map solved answers back into the questions list by id
+        const solvedMap = {};
+        solvedAttempted.forEach(q => {
+          solvedMap[q.id] = q;
+        });
+
+        const updatedQuestions = questions.map(q => {
+          if (solvedMap[q.id]) {
+            return {
+              ...q,
+              correctAnswer: solvedMap[q.id].correctAnswer,
+              explanation: solvedMap[q.id].explanation
+            };
+          }
+          return q;
+        });
+
+        setQuestions(updatedQuestions);
         setAiChecked(true);
 
-        // Recalculate score based on AI determined correct answers
+        // Recalculate score based only on the AI-checked submitted questions
         let newScore = 0;
         let newCorrect = 0;
         let newWrong = 0;
 
-        solved.forEach(q => {
+        attemptedQuestions.forEach(q => {
           const userAns = answers[q.id];
-          if (userAns !== undefined) {
-            if (userAns === q.correctAnswer) {
+          const solvedQ = solvedMap[q.id];
+          if (solvedQ && userAns !== undefined && solvedQ.correctAnswer !== null) {
+            if (userAns === solvedQ.correctAnswer) {
               newCorrect++;
               newScore += marksPerQuestion;
             } else {
