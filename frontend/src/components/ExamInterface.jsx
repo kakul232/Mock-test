@@ -298,3 +298,4 @@ export default function ExamInterface({ testConfig, onFinishExam }) {
     </div>
   );
 }
+

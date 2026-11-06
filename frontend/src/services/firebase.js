@@ -26,3 +26,4 @@ try {
 }
 
 export { app, db, auth };
+

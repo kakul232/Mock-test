@@ -145,3 +145,4 @@ export default function PdfUploader({ onExtract, isLoading }) {
     </div>
   );
 }
+

@@ -176,3 +176,4 @@ export default function ExamResults({ resultData, onRetake, onNewTest }) {
     </div>
   );
 }
+

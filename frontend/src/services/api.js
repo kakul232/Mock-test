@@ -2,7 +2,7 @@
  * Service to communicate with HuggingFace Space backend or local Python FastAPI
  */
 
-const DEFAULT_HF_ENDPOINT = "http://localhost:7860/extract-questions";
+const DEFAULT_HF_ENDPOINT = "https://kakul232-pdf-mock-test-api.hf.space/extract-questions";
 
 export async function extractQuestionsFromPDFs(files, customEndpoint = null, hfToken = null) {
   const endpoint = customEndpoint?.trim() || import.meta.env.VITE_EXTRACTION_API_URL || DEFAULT_HF_ENDPOINT;
@@ -87,3 +87,4 @@ export async function extractQuestionsFromPDFs(files, customEndpoint = null, hfT
     };
   }
 }
+
