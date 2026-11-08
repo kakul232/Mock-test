@@ -59,6 +59,8 @@ class SolveResponse(BaseModel):
 
 # In-memory job tracker for real-time extraction progress
 job_store: Dict[str, dict] = {}
+# In-memory tracker for lab report jobs: lookup by job_id or filename
+lab_report_store: Dict[str, dict] = {}
 
 def clean_ocr_text(text: str) -> str:
     lines = text.split("\n")
@@ -422,33 +424,26 @@ def rule_based_lab_report_parser(raw_text: str) -> Dict[str, Any]:
 
     return report
 
-@app.post("/bhh/lab-report")
-async def extract_lab_report(file: UploadFile = File(...)):
-    """
-    Medical Lab Report Extraction API:
-    Accepts: Image (PNG, JPG, JPEG, WEBP) or PDF file
-    Returns: Structured JSON key-value format of the lab report
-    """
-    if not file:
-        raise HTTPException(status_code=400, detail="No file uploaded.")
-
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-
-    # 1. Extract raw text from Image or PDF
-    raw_text = extract_text_from_file_bytes(content, file.filename)
-    if not raw_text or len(raw_text.strip()) < 5:
-        raise HTTPException(
-            status_code=422,
-            detail="Could not extract readable text or test data from the uploaded file. Please ensure clear image or readable PDF."
-        )
-
-    # 2. Convert to structured JSON key-value format using AI (ChatGPT Gradio Space)
-    structured_json = None
+def process_lab_report_job(job_id: str, content: bytes, filename: str, content_type: str):
+    """Background task to extract and structure lab report."""
     try:
-        client = Client("yuntian-deng/ChatGPT")
-        prompt = f"""You are an expert medical lab report parser. Convert the following medical laboratory report text into a clean, comprehensive, structured JSON key-value format.
+        lab_report_store[job_id]["status"] = "processing"
+        lab_report_store[job_id]["progress"] = 25
+        lab_report_store[job_id]["currentStage"] = "Extracting raw text from document/image..."
+
+        raw_text = extract_text_from_file_bytes(content, filename)
+        if not raw_text or len(raw_text.strip()) < 5:
+            lab_report_store[job_id]["status"] = "failed"
+            lab_report_store[job_id]["error"] = "Could not extract readable text from document. Ensure high resolution or non-empty document."
+            return
+
+        lab_report_store[job_id]["progress"] = 60
+        lab_report_store[job_id]["currentStage"] = "Running AI medical data structuring..."
+
+        structured_json = None
+        try:
+            client = Client("yuntian-deng/ChatGPT")
+            prompt = f"""You are an expert medical lab report parser. Convert the following medical laboratory report text into a clean, comprehensive, structured JSON key-value format.
 
 Extract and structure into keys:
 - "patient_info": (e.g. name, age, gender, patient_id, contact, referred_by_doctor, sample_collection_date, report_date)
@@ -462,32 +457,132 @@ Extract and structure into keys:
     - "reference_range": normal reference interval
     - "status": ("Normal", "High", "Low", "Abnormal", or null)
 - "summary_impressions": any summary notes, clinical comments or diagnosis mentioned
-- "metadata": {{"source_file": "{file.filename}", "total_parameters_detected": ...}}
+- "metadata": {{"source_file": "{filename}", "total_parameters_detected": ...}}
 
 Return ONLY valid JSON without markdown formatting or code fences:
 
 Lab Report Raw Content:
 {raw_text[:3500]}"""
 
-        res = client.predict(inputs=prompt, top_p=1.0, temperature=0.1, chat_counter=0, chatbot=[], api_name="/predict")
-        if res and len(res) > 0 and len(res[0]) > 0:
-            raw_output = res[0][0][1].strip()
-            raw_output = re.sub(r'^```json\s*', '', raw_output, flags=re.IGNORECASE)
-            raw_output = re.sub(r'^```\s*', '', raw_output)
-            raw_output = re.sub(r'\s*```$', '', raw_output)
-            structured_json = json.loads(raw_output)
-    except Exception as ai_err:
-        print(f"AI JSON structuring fallback triggered: {ai_err}")
+            res = client.predict(inputs=prompt, top_p=1.0, temperature=0.1, chat_counter=0, chatbot=[], api_name="/predict")
+            if res and len(res) > 0 and len(res[0]) > 0:
+                raw_output = res[0][0][1].strip()
+                raw_output = re.sub(r'^```json\s*', '', raw_output, flags=re.IGNORECASE)
+                raw_output = re.sub(r'^```\s*', '', raw_output)
+                raw_output = re.sub(r'\s*```$', '', raw_output)
+                structured_json = json.loads(raw_output)
+        except Exception as ai_err:
+            print(f"AI JSON structuring fallback triggered: {ai_err}")
 
-    # 3. Fallback to rule-based parser if AI fails or returns empty
-    if not structured_json:
-        structured_json = rule_based_lab_report_parser(raw_text)
+        if not structured_json:
+            structured_json = rule_based_lab_report_parser(raw_text)
+
+        lab_report_store[job_id]["status"] = "completed"
+        lab_report_store[job_id]["progress"] = 100
+        lab_report_store[job_id]["currentStage"] = "Report successfully structured."
+        lab_report_store[job_id]["data"] = structured_json
+
+        # Index by filename as well for convenient lookup
+        lab_report_store[filename] = lab_report_store[job_id]
+
+    except Exception as e:
+        lab_report_store[job_id]["status"] = "failed"
+        lab_report_store[job_id]["error"] = str(e)
+        if filename in lab_report_store:
+            lab_report_store[filename]["status"] = "failed"
+            lab_report_store[filename]["error"] = str(e)
+
+@app.post("/bhh/lab-report")
+async def extract_lab_report(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    async_mode: Optional[bool] = Form(False)
+):
+    """
+    Medical Lab Report Extraction API:
+    Accepts: Image (PNG, JPG, JPEG, WEBP) or PDF file.
+    Modes:
+      - Default / Synchronous: returns structured JSON directly upon completion.
+      - async_mode=true: returns jobId immediately for status polling via GET /bhh/lab-report/{id|file}/status
+    """
+    if not file:
+        raise HTTPException(status_code=400, detail="No file uploaded.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    job_id = str(uuid.uuid4())
+    initial_job_state = {
+        "jobId": job_id,
+        "filename": file.filename,
+        "contentType": file.content_type,
+        "status": "queued",
+        "progress": 5,
+        "currentStage": "Job queued for processing...",
+        "data": None,
+        "error": None
+    }
+    lab_report_store[job_id] = initial_job_state
+    lab_report_store[file.filename] = initial_job_state
+
+    # Asynchronous background mode
+    if async_mode:
+        background_tasks.add_task(process_lab_report_job, job_id, content, file.filename, file.content_type or "")
+        return {
+            "success": True,
+            "jobId": job_id,
+            "filename": file.filename,
+            "status": "queued",
+            "message": f"Processing started. Check progress at /bhh/lab-report/{job_id}/status"
+        }
+
+    # Synchronous mode: process inline and record to store
+    process_lab_report_job(job_id, content, file.filename, file.content_type or "")
+    res = lab_report_store.get(job_id)
+    if res and res.get("status") == "failed":
+        raise HTTPException(status_code=500, detail=res.get("error", "Lab report processing failed."))
 
     return {
         "success": True,
+        "jobId": job_id,
         "filename": file.filename,
         "content_type": file.content_type,
-        "data": structured_json
+        "data": res.get("data") if res else None
+    }
+
+@app.get("/bhh/lab-report/{identifier:path}/status")
+async def get_lab_report_status(identifier: str):
+    """
+    Check current status of a lab report extraction job by:
+    - job_id (UUID)
+    - filename (e.g. blood_test.pdf)
+    """
+    cleaned_id = identifier.strip().rstrip("/status").strip()
+    
+    # Try exact match first, then by filename
+    job_info = lab_report_store.get(cleaned_id)
+    if not job_info:
+        for k, v in lab_report_store.items():
+            if v.get("filename") == cleaned_id or v.get("jobId") == cleaned_id:
+                job_info = v
+                break
+
+    if not job_info:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Lab report job or file '{cleaned_id}' not found. Please verify the ID or filename."
+        )
+
+    return {
+        "success": True,
+        "jobId": job_info.get("jobId"),
+        "filename": job_info.get("filename"),
+        "status": job_info.get("status"), # "queued" | "processing" | "completed" | "failed"
+        "progress": job_info.get("progress", 0),
+        "currentStage": job_info.get("currentStage", ""),
+        "data": job_info.get("data"),
+        "error": job_info.get("error")
     }
 
 if __name__ == "__main__":
