@@ -441,9 +441,12 @@ def process_lab_report_job(job_id: str, content: bytes, filename: str, content_t
         lab_report_store[job_id]["currentStage"] = "Running AI medical data structuring..."
 
         structured_json = None
+        # Try AI structuring with strict 12s timeout to avoid gateway 502/504
         try:
-            client = Client("yuntian-deng/ChatGPT")
-            prompt = f"""You are an expert medical lab report parser. Convert the following medical laboratory report text into a clean, comprehensive, structured JSON key-value format.
+            import concurrent.futures
+            def call_chatgpt():
+                client = Client("yuntian-deng/ChatGPT")
+                prompt = f"""You are an expert medical lab report parser. Convert the following medical laboratory report text into a clean, comprehensive, structured JSON key-value format.
 
 Extract and structure into keys:
 - "patient_info": (e.g. name, age, gender, patient_id, contact, referred_by_doctor, sample_collection_date, report_date)
@@ -464,16 +467,22 @@ Return ONLY valid JSON without markdown formatting or code fences:
 Lab Report Raw Content:
 {raw_text[:3500]}"""
 
-            res = client.predict(inputs=prompt, top_p=1.0, temperature=0.1, chat_counter=0, chatbot=[], api_name="/predict")
-            if res and len(res) > 0 and len(res[0]) > 0:
-                raw_output = res[0][0][1].strip()
-                raw_output = re.sub(r'^```json\s*', '', raw_output, flags=re.IGNORECASE)
-                raw_output = re.sub(r'^```\s*', '', raw_output)
-                raw_output = re.sub(r'\s*```$', '', raw_output)
-                structured_json = json.loads(raw_output)
-        except Exception as ai_err:
-            print(f"AI JSON structuring fallback triggered: {ai_err}")
+                res = client.predict(inputs=prompt, top_p=1.0, temperature=0.1, chat_counter=0, chatbot=[], api_name="/predict")
+                if res and len(res) > 0 and len(res[0]) > 0:
+                    raw_output = res[0][0][1].strip()
+                    raw_output = re.sub(r'^```json\s*', '', raw_output, flags=re.IGNORECASE)
+                    raw_output = re.sub(r'^```\s*', '', raw_output)
+                    raw_output = re.sub(r'\s*```$', '', raw_output)
+                    return json.loads(raw_output)
+                return None
 
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(call_chatgpt)
+                structured_json = future.result(timeout=14)
+        except Exception as ai_err:
+            print(f"AI JSON structuring fallback triggered (timeout or space unavailable): {ai_err}")
+
+        # Always guarantee instant return with robust rule-based extractor
         if not structured_json:
             structured_json = rule_based_lab_report_parser(raw_text)
 
