@@ -4,12 +4,15 @@ import json
 import re
 import uuid
 import tempfile
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pypdf import PdfReader
 from gradio_client import Client
+from PIL import Image
+import pytesseract
+
 
 app = FastAPI(title="PDF Mock Test Question Extractor API", version="5.2.0")
 
@@ -332,6 +335,160 @@ Return ONLY valid JSON: {{"correctAnswer": 0, "explanation": "Brief reason"}} (0
         solved.append(Question(**q_dict))
 
     return SolveResponse(success=True, solvedQuestions=solved)
+
+def extract_text_from_file_bytes(content: bytes, filename: str) -> str:
+    """Extract raw text from PDF or Image."""
+    lower_name = filename.lower()
+    text = ""
+
+    if lower_name.endswith(".pdf"):
+        # 1. Try PyPDF text extraction
+        try:
+            reader = PdfReader(io.BytesIO(content))
+            for page in reader.pages:
+                text += (page.extract_text() or "") + "\n"
+        except Exception as e:
+            print(f"PyPDF extraction error: {e}")
+
+        # 2. If PDF has minimal or no digital text, try OCR with pdf2image
+        if len(text.strip()) < 50:
+            try:
+                from pdf2image import convert_from_bytes
+                images = convert_from_bytes(content)
+                for img in images:
+                    page_ocr = pytesseract.image_to_string(img)
+                    text += page_ocr + "\n"
+            except Exception as e:
+                print(f"PDF OCR extraction fallback error: {e}")
+
+    elif any(lower_name.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"]):
+        # Image OCR with Tesseract
+        try:
+            image = Image.open(io.BytesIO(content))
+            text = pytesseract.image_to_string(image)
+        except Exception as e:
+            print(f"Image OCR error: {e}")
+            raise HTTPException(status_code=500, detail=f"Image OCR processing failed: {str(e)}")
+    else:
+        # Fallback to UTF-8 text decode
+        try:
+            text = content.decode("utf-8", errors="ignore")
+        except Exception:
+            text = ""
+
+    return text.strip()
+
+def rule_based_lab_report_parser(raw_text: str) -> Dict[str, Any]:
+    """Fallback rule-based regex parser for medical lab reports."""
+    lines = raw_text.split("\n")
+    report = {
+        "patient_info": {},
+        "laboratory_info": {},
+        "test_results": [],
+        "raw_summary": raw_text[:500]
+    }
+    
+    # Common patient demographic patterns
+    patient_patterns = {
+        "name": r"(?:patient\s*name|pt\s*name|name)\s*[:\-]\s*([^\n\r,]+)",
+        "age": r"(?:age|age\s*[\/\-]\s*sex)\s*[:\-]\s*(\d{1,3}\s*(?:yrs|years|y)?)",
+        "gender": r"(?:gender|sex)\s*[:\-]\s*(Male|Female|M|F|Other)",
+        "patient_id": r"(?:patient\s*id|pid|uhid|mrn|reg\s*no)\s*[:\-]\s*([A-Za-z0-9\-\_]+)",
+        "referred_by": r"(?:referred\s*by|ref\s*dr|dr\.)\s*[:\-]\s*([^\n\r]+)",
+        "date": r"(?:date|collection\s*date|reported\s*date)\s*[:\-]\s*([0-9\/\-\.]+)"
+    }
+    
+    for key, pat in patient_patterns.items():
+        m = re.search(pat, raw_text, re.IGNORECASE)
+        if m:
+            report["patient_info"][key] = m.group(1).strip()
+            
+    # Try parsing tabular test rows
+    # e.g.: Hemoglobin 14.2 g/dL 12.0 - 16.0
+    for line in lines:
+        row_match = re.search(r"^\s*([A-Za-z0-9\s\(\)\-\/\.\+]+?)\s{2,}([0-9\.]+|Positive|Negative|Reactive|Non-Reactive)\s+([A-Za-z\/\%µ\^0-9\.\-]+)?\s*([0-9\.\-\<\>\s]+)?", line)
+        if row_match:
+            test_name = row_match.group(1).strip()
+            result_val = row_match.group(2).strip()
+            unit = row_match.group(3).strip() if row_match.group(3) else ""
+            ref_range = row_match.group(4).strip() if row_match.group(4) else ""
+            if len(test_name) > 2 and not any(k in test_name.lower() for k in ["page", "report", "date", "sample", "signature"]):
+                report["test_results"].append({
+                    "test_name": test_name,
+                    "value": result_val,
+                    "unit": unit,
+                    "reference_range": ref_range
+                })
+
+    return report
+
+@app.post("/bhh/lab-report")
+async def extract_lab_report(file: UploadFile = File(...)):
+    """
+    Medical Lab Report Extraction API:
+    Accepts: Image (PNG, JPG, JPEG, WEBP) or PDF file
+    Returns: Structured JSON key-value format of the lab report
+    """
+    if not file:
+        raise HTTPException(status_code=400, detail="No file uploaded.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    # 1. Extract raw text from Image or PDF
+    raw_text = extract_text_from_file_bytes(content, file.filename)
+    if not raw_text or len(raw_text.strip()) < 5:
+        raise HTTPException(
+            status_code=422,
+            detail="Could not extract readable text or test data from the uploaded file. Please ensure clear image or readable PDF."
+        )
+
+    # 2. Convert to structured JSON key-value format using AI (ChatGPT Gradio Space)
+    structured_json = None
+    try:
+        client = Client("yuntian-deng/ChatGPT")
+        prompt = f"""You are an expert medical lab report parser. Convert the following medical laboratory report text into a clean, comprehensive, structured JSON key-value format.
+
+Extract and structure into keys:
+- "patient_info": (e.g. name, age, gender, patient_id, contact, referred_by_doctor, sample_collection_date, report_date)
+- "lab_info": (e.g. lab_name, address, accreditations, pathologist_name)
+- "investigations": array of test panels / categories, each having:
+  - "category_name": (e.g. Complete Blood Count, Liver Function Test, Lipid Profile)
+  - "results": array of items:
+    - "test_name": name of parameter
+    - "value": observed value
+    - "unit": unit of measurement
+    - "reference_range": normal reference interval
+    - "status": ("Normal", "High", "Low", "Abnormal", or null)
+- "summary_impressions": any summary notes, clinical comments or diagnosis mentioned
+- "metadata": {{"source_file": "{file.filename}", "total_parameters_detected": ...}}
+
+Return ONLY valid JSON without markdown formatting or code fences:
+
+Lab Report Raw Content:
+{raw_text[:3500]}"""
+
+        res = client.predict(inputs=prompt, top_p=1.0, temperature=0.1, chat_counter=0, chatbot=[], api_name="/predict")
+        if res and len(res) > 0 and len(res[0]) > 0:
+            raw_output = res[0][0][1].strip()
+            raw_output = re.sub(r'^```json\s*', '', raw_output, flags=re.IGNORECASE)
+            raw_output = re.sub(r'^```\s*', '', raw_output)
+            raw_output = re.sub(r'\s*```$', '', raw_output)
+            structured_json = json.loads(raw_output)
+    except Exception as ai_err:
+        print(f"AI JSON structuring fallback triggered: {ai_err}")
+
+    # 3. Fallback to rule-based parser if AI fails or returns empty
+    if not structured_json:
+        structured_json = rule_based_lab_report_parser(raw_text)
+
+    return {
+        "success": True,
+        "filename": file.filename,
+        "content_type": file.content_type,
+        "data": structured_json
+    }
 
 if __name__ == "__main__":
     import uvicorn
